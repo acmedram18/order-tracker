@@ -6,6 +6,12 @@ requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1",
   "uvicorn>=0.30,<1",
+  "opentelemetry-sdk>=1.26,<2",
+  "opentelemetry-instrumentation-fastapi>=0.47b0,<1",
+  "opentelemetry-exporter-otlp-proto-grpc>=1.26,<2",
+  "prometheus-client>=0.21,<1",
+  "prometheus-fastapi-instrumentator>=7,<9",
+  "structlog>=24,<27",
 ]
 
 [dependency-groups]

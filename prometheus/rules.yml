@@ -1,0 +1,54 @@
+groups:
+  - name: order-tracker-alerts
+    rules:
+      - alert: OrderTrackerDown
+        expr: up{job="order-tracker"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          alertname: OrderTrackerDown
+        annotations:
+          summary: "Order tracker service is down"
+          description: "Prometheus cannot scrape the order-tracker app at app:8000 for the last minute."
+
+      - alert: OrderTrackerHighErrorRate
+        expr: |
+          (
+            sum(rate(http_requests_total{status=~"5.."}[5m]))
+            /
+            sum(rate(http_requests_total[5m]))
+          ) > 0.05
+          and
+          sum(rate(http_requests_total[5m])) > 0.2
+        for: 2m
+        labels:
+          severity: critical
+          alertname: OrderTrackerHighErrorRate
+        annotations:
+          summary: "High 5xx error rate for order-tracker"
+          description: "5xx error ratio over 5m exceeds 5% with sufficient request volume (ratio > 0.05 and request rate > 0.2 req/s)."
+
+      - alert: OrderTrackerSlowResponses
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (
+              rate(http_request_duration_seconds_bucket[5m])
+            )
+          ) > 1
+        for: 5m
+        labels:
+          severity: warning
+          alertname: OrderTrackerSlowResponses
+        annotations:
+          summary: "Order-tracker p95 latency is high"
+          description: "The 95th percentile of request latency over 5m is greater than 1 second."
+
+      - alert: ExpressOrdersOverdue
+        expr: express_orders_overdue > 0
+        for: 1m
+        labels:
+          severity: warning
+          alertname: ExpressOrdersOverdue
+        annotations:
+          summary: "Express orders are overdue"
+          description: "There is at least one express order past its estimated delivery time (express_orders_overdue > 0)."

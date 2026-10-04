@@ -9,9 +9,21 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from app.telemetry import (
+    configure_logging,
+    configure_metrics,
+    configure_tracing,
+    logger,
+    order_status_changes_total,
+    orders_created_total,
+    set_express_orders_overdue,
+    shutdown_telemetry,
+)
+
 
 DB_PATH = Path(os.getenv("ORDER_DB_PATH", "data/orders.db"))
 STATUSES = {"received", "preparing", "shipped", "delivered"}
+EXPRESS_DELIVERY_DAYS = 2
 
 
 def connect():
@@ -51,13 +63,32 @@ def as_dict(row):
     return dict(row) if row else None
 
 
+def estimated_delivery(order):
+    placed_at = datetime.fromisoformat(order["created_at"])
+    if placed_at.tzinfo is None:
+        placed_at = placed_at.replace(tzinfo=timezone.utc)
+    return placed_at + timedelta(days=EXPRESS_DELIVERY_DAYS)
+
+
 def order_detail(row):
     order = as_dict(row)
     if order["priority"] == "express":
-        placed_at = datetime.fromisoformat(order["created_at"])
-        estimated_at = placed_at.replace(day=placed_at.day + 2)
-        order["estimated_delivery"] = estimated_at.date().isoformat()
+        order["estimated_delivery"] = estimated_delivery(order).date().isoformat()
     return order
+
+
+def count_orders():
+    with connect() as db:
+        return db.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+
+
+def count_overdue_express():
+    now = datetime.now(timezone.utc)
+    with connect() as db:
+        rows = db.execute(
+            "SELECT * FROM orders WHERE priority = 'express' AND status != 'delivered'"
+        ).fetchall()
+    return sum(1 for row in rows if now > estimated_delivery(dict(row)))
 
 
 class NewOrder(BaseModel):
@@ -71,12 +102,21 @@ class StatusUpdate(BaseModel):
 
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI):
+async def lifespan(app: FastAPI):
     init_db()
-    yield
+    set_express_orders_overdue(count_overdue_express())
+    logger.info("order_tracker_started", orders=count_orders(), db_path=str(DB_PATH))
+    try:
+        yield
+    finally:
+        await shutdown_telemetry()
 
 
 app = FastAPI(title="Order Tracker", lifespan=lifespan)
+
+configure_logging()
+configure_tracing(app)
+configure_metrics(app)
 
 
 @app.get("/")
@@ -95,6 +135,7 @@ def health():
 def list_orders():
     with connect() as db:
         rows = db.execute("SELECT * FROM orders ORDER BY created_at DESC").fetchall()
+    logger.debug("orders_listed", count=len(rows))
     return [as_dict(row) for row in rows]
 
 
@@ -103,6 +144,7 @@ def get_order(order_id: str):
     with connect() as db:
         row = db.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
     if row is None:
+        logger.warning("order_not_found", order_id=order_id, method="get")
         raise HTTPException(404, "Order not found")
     return order_detail(row)
 
@@ -118,6 +160,9 @@ def create_order(order: NewOrder):
             (order_id, order.customer, order.item, order.priority, "received",
              datetime.now(timezone.utc).isoformat()),
         )
+    orders_created_total.labels(priority=order.priority).inc()
+    set_express_orders_overdue(count_overdue_express())
+    logger.info("order_created", order_id=order_id, priority=order.priority)
     return get_order(order_id)
 
 
@@ -131,5 +176,9 @@ def update_status(order_id: str, update: StatusUpdate):
             (update.status, order_id),
         )
     if cursor.rowcount == 0:
+        logger.warning("order_not_found", order_id=order_id, method="patch")
         raise HTTPException(404, "Order not found")
+    order_status_changes_total.labels(status=update.status).inc()
+    set_express_orders_overdue(count_overdue_express())
+    logger.info("order_status_changed", order_id=order_id, status=update.status)
     return get_order(order_id)

@@ -8,6 +8,9 @@ services:
       - "127.0.0.1:${ORDER_TRACKER_PORT:-8000}:8000"
     environment:
       ORDER_DB_PATH: /data/orders.db
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      OTEL_SERVICE_NAME: order-tracker
+      DEPLOYMENT_ENVIRONMENT: ${DEPLOYMENT_ENVIRONMENT:-local}
     volumes:
       - orders:/data
     restart: unless-stopped
@@ -17,8 +20,70 @@ services:
       timeout: 3s
       retries: 12
 
+  responder:
+    image: order-tracker:${ORDER_TRACKER_TAG:-local}
+    build: .
+    command: ["uv", "run", "--no-sync", "uvicorn", "app.incident.main:app", "--host", "0.0.0.0", "--port", "8001"]
+    ports:
+      - "127.0.0.1:${ORDER_TRACKER_RESPONDER_PORT:-8001}:8001"
+    environment:
+      INCIDENT_DB_PATH: /data/incidents.db
+      INCIDENT_WEBHOOK_URL: ${INCIDENT_WEBHOOK_URL:-}
+      INCIDENT_WEBHOOK_TIMEOUT: ${INCIDENT_WEBHOOK_TIMEOUT:-5.0}
+    volumes:
+      - incidents:/data
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/healthz', timeout=3)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules.yml:/etc/prometheus/rules.yml:ro
+    depends_on:
+      - app
+      - responder
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:9090/-/healthy"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    ports:
+      - "127.0.0.1:${ALERTMANAGER_PORT:-9093}:9093"
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:9093/-/healthy"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.60
+    ports:
+      - "4317"
+      - "127.0.0.1:${JAEGER_PORT:-16686}:16686"
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    restart: unless-stopped
+
 volumes:
   orders:
+  incidents:
 
 networks:
   default:
