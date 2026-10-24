@@ -14,7 +14,7 @@ scrape_configs:
   - job_name: order-tracker
     metrics_path: /metrics
     static_configs:
-      - targets: ["app:8000"]
+      - targets: ["collector:8889"]
         labels:
           environment: local
     honor_labels: true

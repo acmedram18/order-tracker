@@ -107,3 +107,61 @@ def test_count_overdue_express_ignores_delivered_orders(client):
             (recent.isoformat(),),
         )
     assert main.count_overdue_express() == 1
+
+def test_emit_otel_log_uses_context_not_span_context(monkeypatch):
+    from opentelemetry.sdk._logs import LoggerProvider
+    from opentelemetry.sdk._logs.export import (
+        InMemoryLogExporter,
+        SimpleLogRecordProcessor,
+    )
+    from opentelemetry.sdk.trace import TracerProvider
+
+    from app import telemetry
+
+    # conftest disables the SDK globally; this test exercises the real log path.
+    monkeypatch.delenv("OTEL_SDK_DISABLED", raising=False)
+
+    exporter = InMemoryLogExporter()
+    provider = LoggerProvider()
+    provider.add_log_record_processor(SimpleLogRecordProcessor(exporter))
+    monkeypatch.setattr(telemetry, "get_logger_provider", lambda: provider)
+
+    tracer = TracerProvider().get_tracer("test")
+    with tracer.start_as_current_span("order.lookup") as span:
+        span_context = span.get_span_context()
+        telemetry._emit_otel_log(
+            None,
+            None,
+            {
+                "event": "order_lookup",
+                "level": "info",
+                "order_id": "standard-1001",
+                "http_status_code": 200,
+            },
+        )
+
+    records = exporter.get_finished_logs()
+    assert len(records) == 1
+    record = records[0].log_record
+    assert record.body == "order_lookup"
+    assert record.trace_id == span_context.trace_id
+    assert record.span_id == span_context.span_id
+    assert record.attributes["order_id"] == "standard-1001"
+    # LogRecord.context must be an OTel Context (has .get); a SpanContext here
+    # raises AttributeError inside the SDK and turns every log into a 500.
+    assert hasattr(record.context, "get")
+
+
+def test_console_metrics_are_off_unless_enabled(monkeypatch):
+    from app import telemetry
+
+    monkeypatch.delenv("OTEL_SDK_DISABLED", raising=False)
+    monkeypatch.delenv("CONSOLE_SIGNALS_ENABLED", raising=False)
+    monkeypatch.setattr(telemetry, "_meter_provider", None)
+    telemetry.configure_otel_metrics()
+    assert telemetry._meter_provider is None
+
+    monkeypatch.setenv("CONSOLE_SIGNALS_ENABLED", "true")
+    monkeypatch.setattr(telemetry, "_lookup_counter", None)
+    telemetry.configure_otel_metrics()
+    assert telemetry._meter_provider is not None

@@ -1,0 +1,29 @@
+apiVersion: 1
+
+# Grafana's built-in Alertmanager posts the alert to the host-side incident
+# response service. `host.docker.internal` resolves from the Grafana container to
+# the Docker host, and the service binds 0.0.0.0 so it is reachable that way.
+#
+# This is the compose `alertmanager` service's job for Prometheus-fired alerts;
+# this contact point is what routes Grafana-evaluated alerts (order-tracker-5xx).
+contactPoints:
+  - orgId: 1
+    name: incident-response
+    receivers:
+      - uid: incident-response-webhook
+        type: webhook
+        disableResolveMessage: false
+        settings:
+          url: http://host.docker.internal:8001/alerts
+          httpMethod: POST
+
+policies:
+  - orgId: 1
+    receiver: incident-response
+    group_by:
+      - grafana_folder
+      - alertname
+    group_wait: 10s
+    group_interval: 1m
+    # Short enough that a resolve reaches the service during the exercise.
+    repeat_interval: 2m

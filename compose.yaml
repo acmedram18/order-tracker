@@ -8,9 +8,12 @@ services:
       - "127.0.0.1:${ORDER_TRACKER_PORT:-8000}:8000"
     environment:
       ORDER_DB_PATH: /data/orders.db
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://collector:4317
       OTEL_SERVICE_NAME: order-tracker
+      OTEL_LOGS_ENABLED: "true"
       DEPLOYMENT_ENVIRONMENT: ${DEPLOYMENT_ENVIRONMENT:-local}
+      CONSOLE_SIGNALS_ENABLED: ${CONSOLE_SIGNALS_ENABLED:-false}
+      CONSOLE_METRICS_INTERVAL_MS: ${CONSOLE_METRICS_INTERVAL_MS:-5000}
     volumes:
       - orders:/data
     restart: unless-stopped
@@ -42,6 +45,21 @@ services:
       timeout: 3s
       retries: 12
 
+  collector:
+    image: otel/opentelemetry-collector-contrib:0.161.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    ports:
+      - "127.0.0.1:${OTEL_GRPC_PORT:-4317}:4317"
+      - "127.0.0.1:${OTEL_HTTP_PORT:-4318}:4318"
+      - "127.0.0.1:${COLLECTOR_METRICS_PORT:-8889}:8889"
+      - "127.0.0.1:${COLLECTOR_HEALTH_PORT:-13133}:13133"
+    volumes:
+      - ./otel-collector/config.yaml:/etc/otelcol/config.yaml:ro
+    depends_on:
+      - app
+      - tempo
+    restart: unless-stopped
+
   prometheus:
     image: prom/prometheus:v2.54.1
     ports:
@@ -50,14 +68,34 @@ services:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./prometheus/rules.yml:/etc/prometheus/rules.yml:ro
     depends_on:
-      - app
-      - responder
+      - collector
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:9090/-/healthy"]
       interval: 5s
       timeout: 3s
       retries: 12
+
+  loki:
+    image: grafana/loki:3.6.0
+    command: ["-config.file=/etc/loki/loki-config.yaml"]
+    user: "0:0"
+    ports:
+      - "127.0.0.1:${LOKI_PORT:-3100}:3100"
+    volumes:
+      - ./loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki-data:/loki
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:3.1.0
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    ports:
+      - "127.0.0.1:${TEMPO_PORT:-3200}:3200"
+    volumes:
+      - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    restart: unless-stopped
 
   alertmanager:
     image: prom/alertmanager:v0.27.0
@@ -72,18 +110,37 @@ services:
       timeout: 3s
       retries: 12
 
-  jaeger:
-    image: jaegertracing/all-in-one:1.60
+  grafana:
+    image: grafana/grafana:12.4.12
     ports:
-      - "4317"
-      - "127.0.0.1:${JAEGER_PORT:-16686}:16686"
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
     environment:
-      COLLECTOR_OTLP_ENABLED: "true"
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
 volumes:
   orders:
   incidents:
+  loki-data:
+  tempo-data:
+  grafana-data:
 
 networks:
   default:

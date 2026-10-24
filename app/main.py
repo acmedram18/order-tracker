@@ -1,29 +1,38 @@
 import os
 import sqlite3
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
+from opentelemetry import trace
 from pydantic import BaseModel, Field
 
 from app.telemetry import (
     configure_logging,
     configure_metrics,
+    configure_otel_logs,
+    configure_otel_metrics,
     configure_tracing,
     logger,
     order_status_changes_total,
     orders_created_total,
+    record_lookup,
     set_express_orders_overdue,
     shutdown_telemetry,
+    TRACER_NAME,
 )
 
 
 DB_PATH = Path(os.getenv("ORDER_DB_PATH", "data/orders.db"))
 STATUSES = {"received", "preparing", "shipped", "delivered"}
 EXPRESS_DELIVERY_DAYS = 2
+LOOKUP_ROUTE = "/api/orders/{order_id}"
+
+tracer = trace.get_tracer(TRACER_NAME)
 
 
 def connect():
@@ -88,7 +97,15 @@ def count_overdue_express():
         rows = db.execute(
             "SELECT * FROM orders WHERE priority = 'express' AND status != 'delivered'"
         ).fetchall()
-    return sum(1 for row in rows if now > estimated_delivery(dict(row)))
+    overdue = 0
+    for row in rows:
+        try:
+            estimate = estimated_delivery(dict(row))
+        except ValueError:
+            continue
+        if now > estimate:
+            overdue += 1
+    return overdue
 
 
 class NewOrder(BaseModel):
@@ -115,8 +132,10 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Order Tracker", lifespan=lifespan)
 
 configure_logging()
+configure_otel_logs()
 configure_tracing(app)
 configure_metrics(app)
+configure_otel_metrics()
 
 
 @app.get("/")
@@ -140,13 +159,42 @@ def list_orders():
 
 
 @app.get("/api/orders/{order_id}")
-def get_order(order_id: str):
-    with connect() as db:
-        row = db.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
-    if row is None:
-        logger.warning("order_not_found", order_id=order_id, method="get")
-        raise HTTPException(404, "Order not found")
-    return order_detail(row)
+def get_order(order_id: str, request: Request = None):
+    route = LOOKUP_ROUTE
+    if request is not None:
+        route = getattr(request.scope.get("route"), "path", None) or request.url.path
+    started = time.perf_counter()
+    with tracer.start_as_current_span("order.lookup") as span:
+        with connect() as db:
+            row = db.execute(
+                "SELECT * FROM orders WHERE id = ?", (order_id,)
+            ).fetchone()
+        if row is None:
+            status_code = 404
+        else:
+            status_code = 200
+        span.set_attribute("http.route", route)
+        span.set_attribute("http.status_code", status_code)
+        span.set_attribute("order.id", order_id)
+        duration = time.perf_counter() - started
+        record_lookup(route, status_code, duration)
+        if row is None:
+            logger.warning(
+                "order_not_found",
+                order_id=order_id,
+                route=route,
+                http_status_code=status_code,
+                method="get",
+            )
+            raise HTTPException(404, "Order not found")
+        logger.info(
+            "order_lookup",
+            order_id=order_id,
+            route=route,
+            http_status_code=status_code,
+            duration_seconds=round(duration, 6),
+        )
+        return order_detail(row)
 
 
 @app.post("/api/orders", status_code=201)

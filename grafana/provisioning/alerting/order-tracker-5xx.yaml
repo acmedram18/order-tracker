@@ -1,0 +1,97 @@
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: order-tracker-5xx
+    folder: Order Tracker
+    interval: 1m
+    rules:
+      - uid: order-tracker-5xx
+        title: 5xx responses on order-tracker
+        condition: C
+        # A window with no 5xx at all must settle as OK, never as NoData.
+        noDataState: OK
+        execErrState: Error
+        annotations:
+          summary: >-
+            5xx responses on {{ $labels.handler }} in order-tracker over the last
+            5 minutes (5m rolling window, evaluated every 1m).
+          description: >-
+            Endpoint `{{ $labels.handler }}` returned 5xx responses in the last
+            5m rolling window. There were {{ $values.B.Value | printf "%.0f" }}
+            5xx in total across all endpoints. Open the "5xx errors per second"
+            and "Server errors per second by route" panels on the Order Tracker -
+            Requests and Errors dashboard to see the rate and the breakdown.
+          runbook_url: http://127.0.0.1:3000/d/order-tracker-overview/order-tracker-requests-and-errors?viewPanel=6
+          dashboardUid: order-tracker-overview
+          panelId: "2"
+          # Native query-backed annotations: Grafana renders these as a
+          # handler/count table in the UI and in notification templates.
+          count_5xx_total: B
+          endpoints: A
+        labels:
+          severity: critical
+          service: order-tracker
+        data:
+          # One series per failing endpoint. Keeping the `handler` label means
+          # Grafana raises a separate alert instance per endpoint, which is what
+          # lets {{ $labels.handler }} name the endpoint in the alert body.
+          # `or vector(0)` is what keeps a quiet period from becoming a NoData
+          # gap: with no matching series, sum() returns an empty vector, so we
+          # fall back to a literal 0.
+          - refId: A
+            queryType: ""
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: order-tracker-prometheus
+            model:
+              editorMode: code
+              expr: sum by (handler) (increase(http_requests_total{status=~"5.."}[5m])) or vector(0)
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: A
+          # Flat total across endpoints, quoted in the description.
+          - refId: B
+            queryType: ""
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: order-tracker-prometheus
+            model:
+              editorMode: code
+              expr: sum(increase(http_requests_total{status=~"5.."}[5m])) or vector(0)
+              format: table
+              instant: true
+              intervalMs: 1000
+              maxDataPoints: 43200
+              refId: B
+          - refId: C
+            queryType: ""
+            relativeTimeRange:
+              from: 0
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 0
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              datasource:
+                type: __expr__
+                uid: __expr__
+              expression: A
+              reducer: last
+              refId: C
+              type: reduce
